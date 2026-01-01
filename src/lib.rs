@@ -64,3 +64,6 @@ pub use compaction::CompactionStats;
 
 // Iterators
 pub use iterator::{DBIterator, DBIteratorBuilder, IteratorDirection};
+
+// Cache
+pub use cache::{BlockCache, CacheStats, LruCache, TableCache};
