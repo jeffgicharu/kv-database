@@ -61,3 +61,6 @@ pub use db::{Database, DatabaseStats, LevelStats};
 
 // Compaction (re-export useful types)
 pub use compaction::CompactionStats;
+
+// Iterators
+pub use iterator::{DBIterator, DBIteratorBuilder, IteratorDirection};

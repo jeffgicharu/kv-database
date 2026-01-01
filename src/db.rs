@@ -726,6 +726,59 @@ impl Database {
         }
     }
 
+    /// Create an iterator over the entire database.
+    ///
+    /// Returns an iterator that yields all key-value pairs in sorted order.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// for (key, value) in db.iter()? {
+    ///     println!("{:?} = {:?}", key, value);
+    /// }
+    /// ```
+    pub fn iter(self: &Arc<Self>) -> Result<crate::iterator::DBIterator> {
+        crate::iterator::DBIteratorBuilder::new(self.sequence.load(Ordering::SeqCst))
+            .build(self)
+    }
+
+    /// Create an iterator for a key range.
+    ///
+    /// Returns an iterator that yields key-value pairs where the key is >= start
+    /// and < end.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// for (key, value) in db.range(b"a", b"z")? {
+    ///     println!("{:?} = {:?}", key, value);
+    /// }
+    /// ```
+    pub fn range(self: &Arc<Self>, start: &[u8], end: &[u8]) -> Result<crate::iterator::DBIterator> {
+        crate::iterator::DBIteratorBuilder::new(self.sequence.load(Ordering::SeqCst))
+            .start(Bytes::copy_from_slice(start))
+            .end(Bytes::copy_from_slice(end))
+            .build(self)
+    }
+
+    /// Create an iterator for keys with a given prefix.
+    ///
+    /// Returns an iterator that yields key-value pairs where the key starts
+    /// with the given prefix.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// for (key, value) in db.prefix_iter(b"user:")? {
+    ///     println!("{:?} = {:?}", key, value);
+    /// }
+    /// ```
+    pub fn prefix_iter(self: &Arc<Self>, prefix: &[u8]) -> Result<crate::iterator::DBIterator> {
+        crate::iterator::DBIteratorBuilder::new(self.sequence.load(Ordering::SeqCst))
+            .prefix(Bytes::copy_from_slice(prefix))
+            .build(self)
+    }
+
     /// Close the database gracefully.
     pub fn close(&self) -> Result<()> {
         // Mark as shutting down
@@ -774,6 +827,21 @@ impl Database {
     /// Get the current sequence number.
     pub fn sequence(&self) -> u64 {
         self.sequence.load(Ordering::SeqCst)
+    }
+
+    /// Get a reference to the memtable (for iterators).
+    pub(crate) fn memtable_ref(&self) -> &RwLock<Arc<crate::memtable::MemTable>> {
+        &self.memtable
+    }
+
+    /// Get a reference to immutable memtables (for iterators).
+    pub(crate) fn imm_memtables_ref(&self) -> &RwLock<std::collections::VecDeque<ImmutableMemTable>> {
+        &self.imm_memtables
+    }
+
+    /// Get a reference to the version set (for iterators).
+    pub(crate) fn versions_ref(&self) -> &Arc<VersionSet> {
+        &self.versions
     }
 }
 
@@ -1216,5 +1284,75 @@ mod tests {
 
         drop(txn2);
         assert_eq!(db.active_transaction_count(), 0);
+    }
+
+    #[test]
+    fn test_database_iter() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+
+        db.put(b"key1", b"value1").unwrap();
+        db.put(b"key2", b"value2").unwrap();
+        db.put(b"key3", b"value3").unwrap();
+
+        let entries: Vec<_> = db.iter().unwrap().collect();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].0.as_ref(), b"key1");
+        assert_eq!(entries[1].0.as_ref(), b"key2");
+        assert_eq!(entries[2].0.as_ref(), b"key3");
+    }
+
+    #[test]
+    fn test_database_range() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+
+        db.put(b"a", b"1").unwrap();
+        db.put(b"b", b"2").unwrap();
+        db.put(b"c", b"3").unwrap();
+        db.put(b"d", b"4").unwrap();
+        db.put(b"e", b"5").unwrap();
+
+        let entries: Vec<_> = db.range(b"b", b"e").unwrap().collect();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].0.as_ref(), b"b");
+        assert_eq!(entries[1].0.as_ref(), b"c");
+        assert_eq!(entries[2].0.as_ref(), b"d");
+    }
+
+    #[test]
+    fn test_database_prefix_iter() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+
+        db.put(b"user:1", b"alice").unwrap();
+        db.put(b"user:2", b"bob").unwrap();
+        db.put(b"user:3", b"charlie").unwrap();
+        db.put(b"post:1", b"hello").unwrap();
+        db.put(b"post:2", b"world").unwrap();
+
+        let users: Vec<_> = db.prefix_iter(b"user:").unwrap().collect();
+        assert_eq!(users.len(), 3);
+        assert!(users.iter().all(|(k, _)| k.starts_with(b"user:")));
+
+        let posts: Vec<_> = db.prefix_iter(b"post:").unwrap().collect();
+        assert_eq!(posts.len(), 2);
+        assert!(posts.iter().all(|(k, _)| k.starts_with(b"post:")));
+    }
+
+    #[test]
+    fn test_database_iter_with_deletes() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+
+        db.put(b"key1", b"value1").unwrap();
+        db.put(b"key2", b"value2").unwrap();
+        db.put(b"key3", b"value3").unwrap();
+        db.delete(b"key2").unwrap();
+
+        let entries: Vec<_> = db.iter().unwrap().collect();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].0.as_ref(), b"key1");
+        assert_eq!(entries[1].0.as_ref(), b"key3");
     }
 }
