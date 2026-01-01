@@ -1,0 +1,66 @@
+[package]
+name = "rustdb"
+version = "0.1.0"
+edition = "2021"
+authors = ["Jeff Gicharu"]
+description = "An embedded LSM-tree key-value database with ACID transactions"
+license = "MIT"
+repository = "https://github.com/yourusername/rustdb"
+keywords = ["database", "key-value", "lsm-tree", "storage", "embedded"]
+categories = ["database", "data-structures"]
+
+[lib]
+name = "rustdb"
+path = "src/lib.rs"
+
+[dependencies]
+# Concurrency primitives
+crossbeam-skiplist = "0.1"
+parking_lot = "0.12"
+arc-swap = "1"
+dashmap = "6"
+
+# Serialization and encoding
+bytes = "1"
+integer-encoding = "4"
+
+# Compression
+lz4_flex = "0.11"
+snap = "1"
+
+# Hashing and checksums
+crc32fast = "1"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+# Async runtime (for background tasks)
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "fs", "time", "signal"] }
+
+# Logging and tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+
+# Metrics
+prometheus-client = "0.22"
+
+# Error handling
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
+rand = "0.8"
+criterion = { version = "0.5", features = ["html_reports"] }
+tokio-test = "0.4"
+
+[[bench]]
+name = "benchmark"
+harness = false
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.bench]
+lto = true
+codegen-units = 1

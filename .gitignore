@@ -1,0 +1,5 @@
+/target
+
+# Internal planning docs
+docs/BUILD_PLAN.md
+docs/DECISIONS.md
