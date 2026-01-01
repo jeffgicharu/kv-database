@@ -24,6 +24,7 @@ use parking_lot::{Mutex, RwLock};
 
 use crate::compaction::{BackgroundCompaction, CompactionStats};
 use crate::memtable::{ImmutableMemTable, MemTable};
+use crate::transaction::{Snapshot, Transaction, TransactionManager};
 use crate::options::Options;
 use crate::sstable::{CompressionType, SSTableReader, SSTableWriter};
 use crate::types::{InternalKey, LookupResult, WriteBatch};
@@ -64,6 +65,8 @@ pub struct Database {
     bg_error: RwLock<Option<Error>>,
     /// Background compaction manager.
     bg_compaction: Arc<BackgroundCompaction>,
+    /// Transaction manager.
+    txn_manager: Arc<RwLock<Option<TransactionManager>>>,
 }
 
 impl Database {
@@ -179,7 +182,14 @@ impl Database {
             write_mutex: Mutex::new(()),
             bg_error: RwLock::new(None),
             bg_compaction,
+            txn_manager: Arc::new(RwLock::new(None)),
         });
+
+        // Initialize transaction manager (needs Arc<Database>)
+        {
+            let txn_manager = TransactionManager::new(Arc::clone(&db));
+            *db.txn_manager.write() = Some(txn_manager);
+        }
 
         // Start background compaction thread
         db.bg_compaction.start();
@@ -624,6 +634,73 @@ impl Database {
         self.bg_compaction.is_enabled()
     }
 
+    // =========================================================================
+    // Transaction API
+    // =========================================================================
+
+    /// Begin a new transaction.
+    ///
+    /// The transaction provides snapshot isolation - all reads will see
+    /// a consistent view as of when the transaction started.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let txn = db.begin_transaction()?;
+    /// txn.put(b"key", b"value")?;
+    /// txn.commit()?;
+    /// ```
+    pub fn begin_transaction(self: &Arc<Self>) -> Result<Transaction> {
+        let guard = self.txn_manager.read();
+        let txn_manager = guard.as_ref()
+            .ok_or_else(|| Error::internal("Transaction manager not initialized"))?;
+        txn_manager.begin()
+    }
+
+    /// Create a snapshot of the current database state.
+    ///
+    /// Snapshots are lighter weight than transactions - they only
+    /// provide consistent reads, not writes.
+    pub fn snapshot(self: &Arc<Self>) -> Result<Snapshot> {
+        let guard = self.txn_manager.read();
+        let txn_manager = guard.as_ref()
+            .ok_or_else(|| Error::internal("Transaction manager not initialized"))?;
+        txn_manager.snapshot()
+    }
+
+    /// Get a value at a specific snapshot.
+    pub fn get_snapshot(&self, key: &[u8], snapshot: &Snapshot) -> Result<Option<Bytes>> {
+        self.get_at_sequence(key, snapshot.sequence())
+    }
+
+    /// Get the number of active transactions.
+    pub fn active_transaction_count(self: &Arc<Self>) -> usize {
+        let guard = self.txn_manager.read();
+        guard.as_ref()
+            .map(|m| m.active_count() as usize)
+            .unwrap_or(0)
+    }
+
+    /// Get the oldest snapshot sequence.
+    ///
+    /// This is used by compaction to know which old versions must be preserved.
+    pub fn oldest_snapshot_sequence(self: &Arc<Self>) -> u64 {
+        let guard = self.txn_manager.read();
+        guard.as_ref()
+            .map(|m| m.oldest_snapshot_sequence())
+            .unwrap_or(0)
+    }
+
+    /// Notify that a transaction has ended.
+    ///
+    /// Called automatically when a transaction is committed, rolled back, or dropped.
+    pub(crate) fn transaction_ended(&self, txn_id: crate::transaction::TransactionId) {
+        let guard = self.txn_manager.read();
+        if let Some(txn_manager) = guard.as_ref() {
+            txn_manager.transaction_ended(txn_id);
+        }
+    }
+
     /// Get database statistics.
     pub fn stats(&self) -> DatabaseStats {
         let version = self.versions.current();
@@ -959,5 +1036,185 @@ mod tests {
 
         let result = Database::open_with_options(&non_existent, opts);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_transaction_basic() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+
+        // Begin a transaction
+        let txn = db.begin_transaction().unwrap();
+        assert!(txn.is_active());
+        assert_eq!(txn.write_count(), 0);
+
+        // Put a value
+        txn.put(b"key1", b"value1").unwrap();
+        assert_eq!(txn.write_count(), 1);
+
+        // Read within transaction
+        let value = txn.get(b"key1").unwrap();
+        assert_eq!(value, Some(Bytes::from("value1")));
+
+        // Commit
+        txn.commit().unwrap();
+
+        // Verify value is in database
+        let value = db.get(b"key1").unwrap();
+        assert_eq!(value, Some(Bytes::from("value1")));
+    }
+
+    #[test]
+    fn test_transaction_rollback() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+
+        // Write initial value
+        db.put(b"key1", b"original").unwrap();
+
+        // Begin transaction and modify
+        let txn = db.begin_transaction().unwrap();
+        txn.put(b"key1", b"modified").unwrap();
+        txn.put(b"key2", b"new").unwrap();
+
+        // Rollback
+        txn.rollback().unwrap();
+
+        // Original value should remain
+        let value = db.get(b"key1").unwrap();
+        assert_eq!(value, Some(Bytes::from("original")));
+
+        // New key should not exist
+        let value = db.get(b"key2").unwrap();
+        assert!(value.is_none());
+    }
+
+    #[test]
+    fn test_transaction_snapshot_isolation() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+
+        // Write initial value
+        db.put(b"key1", b"value1").unwrap();
+
+        // Begin transaction - takes a snapshot
+        let txn = db.begin_transaction().unwrap();
+
+        // Read value in transaction
+        let value = txn.get(b"key1").unwrap();
+        assert_eq!(value, Some(Bytes::from("value1")));
+
+        // Modify value outside transaction
+        db.put(b"key1", b"value2").unwrap();
+
+        // Transaction should still see old value (snapshot isolation)
+        let value = txn.get(b"key1").unwrap();
+        assert_eq!(value, Some(Bytes::from("value1")));
+
+        // Drop transaction without commit
+        drop(txn);
+
+        // Database should have the new value
+        let value = db.get(b"key1").unwrap();
+        assert_eq!(value, Some(Bytes::from("value2")));
+    }
+
+    #[test]
+    fn test_transaction_delete() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+
+        // Write initial value
+        db.put(b"key1", b"value1").unwrap();
+
+        // Begin transaction and delete
+        let txn = db.begin_transaction().unwrap();
+        txn.delete(b"key1").unwrap();
+
+        // Key should appear deleted in transaction
+        let value = txn.get(b"key1").unwrap();
+        assert!(value.is_none());
+
+        // Commit
+        txn.commit().unwrap();
+
+        // Key should be deleted from database
+        let value = db.get(b"key1").unwrap();
+        assert!(value.is_none());
+    }
+
+    #[test]
+    fn test_transaction_multiple_operations() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+
+        // Begin transaction with multiple operations
+        let txn = db.begin_transaction().unwrap();
+        txn.put(b"key1", b"value1").unwrap();
+        txn.put(b"key2", b"value2").unwrap();
+        txn.put(b"key3", b"value3").unwrap();
+        txn.delete(b"key2").unwrap();
+        txn.put(b"key1", b"updated1").unwrap();
+
+        // Verify reads within transaction
+        assert_eq!(txn.get(b"key1").unwrap(), Some(Bytes::from("updated1")));
+        assert_eq!(txn.get(b"key2").unwrap(), None);
+        assert_eq!(txn.get(b"key3").unwrap(), Some(Bytes::from("value3")));
+
+        // Commit
+        txn.commit().unwrap();
+
+        // Verify final state
+        assert_eq!(db.get(b"key1").unwrap(), Some(Bytes::from("updated1")));
+        assert!(db.get(b"key2").unwrap().is_none());
+        assert_eq!(db.get(b"key3").unwrap(), Some(Bytes::from("value3")));
+    }
+
+    #[test]
+    fn test_snapshot_basic() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+
+        // Write initial values
+        db.put(b"key1", b"value1").unwrap();
+        db.put(b"key2", b"value2").unwrap();
+
+        // Create snapshot
+        let snapshot = db.snapshot().unwrap();
+
+        // Modify values
+        db.put(b"key1", b"modified1").unwrap();
+        db.delete(b"key2").unwrap();
+        db.put(b"key3", b"value3").unwrap();
+
+        // Snapshot should still see old values
+        assert_eq!(db.get_snapshot(b"key1", &snapshot).unwrap(), Some(Bytes::from("value1")));
+        assert_eq!(db.get_snapshot(b"key2", &snapshot).unwrap(), Some(Bytes::from("value2")));
+        assert!(db.get_snapshot(b"key3", &snapshot).unwrap().is_none());
+
+        // Current view should see new values
+        assert_eq!(db.get(b"key1").unwrap(), Some(Bytes::from("modified1")));
+        assert!(db.get(b"key2").unwrap().is_none());
+        assert_eq!(db.get(b"key3").unwrap(), Some(Bytes::from("value3")));
+    }
+
+    #[test]
+    fn test_active_transaction_count() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+
+        assert_eq!(db.active_transaction_count(), 0);
+
+        let txn1 = db.begin_transaction().unwrap();
+        assert_eq!(db.active_transaction_count(), 1);
+
+        let txn2 = db.begin_transaction().unwrap();
+        assert_eq!(db.active_transaction_count(), 2);
+
+        drop(txn1);
+        assert_eq!(db.active_transaction_count(), 1);
+
+        drop(txn2);
+        assert_eq!(db.active_transaction_count(), 0);
     }
 }

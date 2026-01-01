@@ -34,12 +34,12 @@ pub enum Error {
     CrcMismatch { expected: u32, actual: u32 },
 
     /// Transaction conflict during commit.
-    #[error("Transaction conflict: key was modified by another transaction")]
-    TransactionConflict,
+    #[error("Transaction conflict: {0}")]
+    TransactionConflict(String),
 
     /// Transaction has already been committed or aborted.
-    #[error("Transaction is no longer active")]
-    TransactionNotActive,
+    #[error("Transaction aborted: {0}")]
+    TransactionAborted(String),
 
     /// Database is closed.
     #[error("Database is closed")]
@@ -144,7 +144,8 @@ impl Error {
             Error::WriteBufferFull
                 | Error::TooManyOpenFiles
                 | Error::TooManyTransactions
-                | Error::TransactionConflict
+                | Error::TransactionConflict(_)
+                | Error::TransactionAborted(_)
         )
     }
 
@@ -179,7 +180,8 @@ mod tests {
     #[test]
     fn test_error_is_recoverable() {
         assert!(Error::WriteBufferFull.is_recoverable());
-        assert!(Error::TransactionConflict.is_recoverable());
+        assert!(Error::TransactionConflict("conflict".into()).is_recoverable());
+        assert!(Error::TransactionAborted("aborted".into()).is_recoverable());
         assert!(!Error::Corruption("bad".into()).is_recoverable());
     }
 
