@@ -7,15 +7,27 @@ use thiserror::Error;
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Error types for database operations.
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum Error {
     /// I/O error from file operations.
     #[error("I/O error: {0}")]
-    Io(#[from] io::Error),
+    Io(String),
 
     /// Data corruption detected.
     #[error("Corruption detected: {0}")]
     Corruption(String),
+
+    /// Resource not found.
+    #[error("Not found: {0}")]
+    NotFound(String),
+
+    /// Resource already exists.
+    #[error("Already exists: {0}")]
+    AlreadyExists(String),
+
+    /// Lock error.
+    #[error("Lock error: {0}")]
+    LockError(String),
 
     /// CRC checksum mismatch.
     #[error("CRC mismatch: expected {expected:#x}, got {actual:#x}")]
@@ -96,6 +108,12 @@ pub enum Error {
     /// Internal error (should not happen).
     #[error("Internal error: {0}")]
     Internal(String),
+}
+
+impl From<io::Error> for Error {
+    fn from(err: io::Error) -> Self {
+        Error::Io(err.to_string())
+    }
 }
 
 impl Error {

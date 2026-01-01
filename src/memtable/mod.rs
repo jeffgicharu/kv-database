@@ -380,6 +380,14 @@ impl ImmutableMemTable {
         }
     }
 
+    /// Create from an existing Arc<MemTable>.
+    ///
+    /// This is useful when the memtable is already wrapped in an Arc,
+    /// such as when freezing the active memtable.
+    pub fn from_arc(memtable: Arc<MemTable>) -> Self {
+        Self { inner: memtable }
+    }
+
     /// Get a reference to the inner MemTable.
     pub fn inner(&self) -> &MemTable {
         &self.inner

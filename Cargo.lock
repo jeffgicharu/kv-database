@@ -674,6 +674,7 @@ dependencies = [
  "crossbeam-skiplist",
  "dashmap",
  "integer-encoding",
+ "libc",
  "lz4_flex",
  "parking_lot",
  "prometheus-client",

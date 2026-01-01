@@ -125,8 +125,16 @@ impl SSTableWriter {
         }
         self.largest_key = Some(Bytes::copy_from_slice(key));
 
-        // Add to bloom filter
-        self.filter_builder.add(key);
+        // Add user key to bloom filter (internal key is user_key + 8 bytes of seq/type)
+        // This allows bloom filter lookups by user key
+        // Only strip the 8-byte suffix if the key is long enough to be an internal key
+        // (i.e., has at least 1 byte of user key + 8 bytes of seq/type)
+        if key.len() > 8 {
+            self.filter_builder.add(&key[..key.len() - 8]);
+        } else {
+            // For short keys or raw keys (not internal keys), add as-is
+            self.filter_builder.add(key);
+        }
 
         // Add to data block
         self.data_block.add(key, value);

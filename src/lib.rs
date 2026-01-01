@@ -36,6 +36,9 @@ pub mod error;
 pub mod options;
 pub mod types;
 
+// Database module
+mod db;
+
 // Internal modules
 mod cache;
 mod compaction;
@@ -53,5 +56,5 @@ pub use error::{Error, Result};
 pub use options::{Compression, Options, SyncMode};
 pub use types::{InternalKey, ValueType, WriteBatch};
 
-// Database will be added later
-// pub use db::Database;
+// Database
+pub use db::{Database, DatabaseStats, LevelStats};

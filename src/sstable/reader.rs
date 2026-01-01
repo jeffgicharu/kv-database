@@ -99,7 +99,7 @@ impl SSTableReader {
         }
     }
 
-    /// Get a value by key.
+    /// Get a value by exact key match.
     ///
     /// Returns None if the key doesn't exist.
     pub fn get(&mut self, key: &[u8]) -> Result<Option<Bytes>> {
@@ -132,6 +132,109 @@ impl SSTableReader {
             Ok(Some(block_iter.value().clone()))
         } else {
             Ok(None)
+        }
+    }
+
+    /// MVCC-aware lookup: find value for user_key at given sequence.
+    ///
+    /// This method handles internal keys with sequence numbers. It searches
+    /// for entries with the same user_key and returns the value with the
+    /// highest sequence number <= target_sequence.
+    ///
+    /// Returns:
+    /// - Ok(Some(value)) if a valid value was found
+    /// - Ok(None) if the key doesn't exist or was deleted
+    /// - Err if there was a read error
+    pub fn get_user_key(
+        &mut self,
+        user_key: &[u8],
+        target_sequence: u64,
+    ) -> Result<Option<Bytes>> {
+        use crate::types::{InternalKey, ValueType};
+
+        // Check bloom filter first
+        if !self.may_contain(user_key) {
+            return Ok(None);
+        }
+
+        // Create a lookup key with sequence 0 to find the first entry for this user_key
+        // (since lower sequences have lower encoded values)
+        let start_key = InternalKey::new(
+            Bytes::copy_from_slice(user_key),
+            0,
+            ValueType::Value,
+        );
+        let start_encoded = start_key.encode();
+
+        // Find the data block that might contain this key
+        let mut index_iter = self.index_block.iter();
+        index_iter.seek(&start_encoded);
+
+        // We may need to search multiple blocks
+        let mut best_value: Option<Bytes> = None;
+        let mut best_sequence: u64 = 0;
+        let mut found_deletion = false;
+
+        while index_iter.valid() {
+            // Parse the block handle from the index entry value
+            let handle_data = index_iter.value();
+            let mut cursor = handle_data.as_ref();
+            let handle = BlockHandle::decode(&mut cursor)?;
+
+            // Read and search the data block
+            let block_data = Self::read_block_data(&mut self.file, &handle)?;
+            let block = Block::new_with_trailer(&block_data)?;
+
+            let mut block_iter = block.iter();
+            block_iter.seek(&start_encoded);
+
+            while block_iter.valid() {
+                let key_bytes = block_iter.key();
+
+                // Parse the internal key
+                if let Some(found_user_key) = InternalKey::parse_user_key(&key_bytes) {
+                    // Check if this is still the same user key
+                    if found_user_key != user_key {
+                        // Moved past our user key, we're done
+                        if let Some(value) = best_value {
+                            if found_deletion {
+                                return Ok(None);
+                            }
+                            return Ok(Some(value));
+                        }
+                        return Ok(None);
+                    }
+
+                    // Check sequence number
+                    if let Some(seq) = InternalKey::parse_sequence(&key_bytes) {
+                        if seq <= target_sequence && seq > best_sequence {
+                            // This is a better match
+                            best_sequence = seq;
+
+                            // Check if it's a deletion
+                            if let Some(internal_key) = InternalKey::decode(&key_bytes) {
+                                if internal_key.is_deletion() {
+                                    found_deletion = true;
+                                    best_value = None;
+                                } else {
+                                    found_deletion = false;
+                                    best_value = Some(block_iter.value().clone());
+                                }
+                            }
+                        }
+                    }
+                }
+
+                block_iter.next();
+            }
+
+            index_iter.next();
+        }
+
+        if found_deletion {
+            Ok(None)
+        } else {
+            Ok(best_value)
         }
     }
 
