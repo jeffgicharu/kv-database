@@ -58,3 +58,6 @@ pub use types::{InternalKey, ValueType, WriteBatch};
 
 // Database
 pub use db::{Database, DatabaseStats, LevelStats};
+
+// Compaction (re-export useful types)
+pub use compaction::CompactionStats;

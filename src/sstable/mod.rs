@@ -55,7 +55,7 @@ mod writer;
 pub use block::{Block, BlockHandle};
 pub use block_builder::BlockBuilder;
 pub use filter::BloomFilter;
-pub use iterator::SSTableIterator;
+pub use iterator::{SSTableEntryIterator, SSTableIterator};
 pub use reader::SSTableReader;
 pub use writer::SSTableWriter;
 

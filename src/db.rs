@@ -22,6 +22,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use parking_lot::{Mutex, RwLock};
 
+use crate::compaction::{BackgroundCompaction, CompactionStats};
 use crate::memtable::{ImmutableMemTable, MemTable};
 use crate::options::Options;
 use crate::sstable::{CompressionType, SSTableReader, SSTableWriter};
@@ -61,6 +62,8 @@ pub struct Database {
     write_mutex: Mutex<()>,
     /// Background error (if any).
     bg_error: RwLock<Option<Error>>,
+    /// Background compaction manager.
+    bg_compaction: Arc<BackgroundCompaction>,
 }
 
 impl Database {
@@ -155,6 +158,13 @@ impl Database {
             (memtable, wal, log_number, last_sequence)
         };
 
+        // Create background compaction manager
+        let bg_compaction = BackgroundCompaction::new(
+            &db_path,
+            Arc::clone(&options),
+            Arc::clone(&versions),
+        );
+
         let db = Arc::new(Self {
             db_path,
             options,
@@ -168,7 +178,11 @@ impl Database {
             shutting_down: AtomicBool::new(false),
             write_mutex: Mutex::new(()),
             bg_error: RwLock::new(None),
+            bg_compaction,
         });
+
+        // Start background compaction thread
+        db.bg_compaction.start();
 
         Ok(db)
     }
@@ -388,10 +402,10 @@ impl Database {
         Ok(())
     }
 
-    /// Maybe schedule a flush (for now, this is synchronous).
+    /// Maybe schedule a flush and trigger compaction check.
     fn maybe_schedule_flush(&self) -> Result<()> {
-        // In a full implementation, this would trigger background flush
-        // For now, we'll check if flush is needed
+        // Trigger compaction check after flush
+        self.bg_compaction.maybe_schedule_compaction();
         Ok(())
     }
 
@@ -460,6 +474,9 @@ impl Database {
 
             // Apply edit
             self.versions.log_and_apply(&mut edit)?;
+
+            // Trigger compaction check after adding L0 file
+            self.bg_compaction.maybe_schedule_compaction();
         }
 
         Ok(())
@@ -556,12 +573,55 @@ impl Database {
     }
 
     /// Force compaction of all levels.
+    ///
+    /// This runs compaction synchronously until no more compaction is needed.
     pub fn compact(&self) -> Result<()> {
         // Flush memtable first
         self.flush()?;
 
-        // Compaction will be implemented in Phase 7
+        // Run compaction until done
+        loop {
+            let version = self.versions.current();
+            if !version.needs_compaction() {
+                break;
+            }
+
+            // Run a single compaction
+            if self.bg_compaction.compact_level(version.compaction_level())?.is_none() {
+                break;
+            }
+        }
+
         Ok(())
+    }
+
+    /// Compact a specific level.
+    ///
+    /// Returns statistics if compaction was performed, None otherwise.
+    pub fn compact_level(&self, level: usize) -> Result<Option<CompactionStats>> {
+        self.bg_compaction.compact_level(level)
+    }
+
+    /// Compact a key range at a specific level.
+    ///
+    /// This is useful for targeted compaction of hot spots.
+    pub fn compact_range(
+        &self,
+        level: usize,
+        begin: Option<&[u8]>,
+        end: Option<&[u8]>,
+    ) -> Result<Option<CompactionStats>> {
+        self.bg_compaction.compact_range(level, begin, end)
+    }
+
+    /// Enable or disable background compaction.
+    pub fn set_background_compaction_enabled(&self, enabled: bool) {
+        self.bg_compaction.set_enabled(enabled);
+    }
+
+    /// Check if background compaction is enabled.
+    pub fn background_compaction_enabled(&self) -> bool {
+        self.bg_compaction.is_enabled()
     }
 
     /// Get database statistics.
@@ -593,6 +653,9 @@ impl Database {
     pub fn close(&self) -> Result<()> {
         // Mark as shutting down
         self.shutting_down.store(true, Ordering::SeqCst);
+
+        // Stop background compaction
+        self.bg_compaction.stop();
 
         // Acquire write lock to ensure no concurrent writes
         let _write_guard = self.write_mutex.lock();
