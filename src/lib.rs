@@ -67,3 +67,6 @@ pub use iterator::{DBIterator, DBIteratorBuilder, IteratorDirection};
 
 // Cache
 pub use cache::{BlockCache, CacheStats, LruCache, TableCache};
+
+// Metrics
+pub use metrics::{Counter, DbMetrics, Gauge, Histogram, MetricsSummary};
