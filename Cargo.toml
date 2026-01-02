@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["Jeff Gicharu"]
 description = "An embedded LSM-tree key-value database with ACID transactions"
 license = "MIT"
-repository = "https://github.com/yourusername/rustdb"
+repository = "https://github.com/jeffgicharu/kv-database"
 keywords = ["database", "key-value", "lsm-tree", "storage", "embedded"]
 categories = ["database", "data-structures"]
 
