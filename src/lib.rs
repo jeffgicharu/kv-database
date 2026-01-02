@@ -70,3 +70,6 @@ pub use cache::{BlockCache, CacheStats, LruCache, TableCache};
 
 // Metrics
 pub use metrics::{Counter, DbMetrics, Gauge, Histogram, MetricsSummary};
+
+// Transactions
+pub use transaction::{Transaction, TransactionState};
